@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using Azure.Storage.Blobs;
 using Azure.Storage.Blobs.Models;
@@ -21,39 +22,48 @@ namespace HeaderVerifier
         public static async Task RunOrchestrator(
             [OrchestrationTrigger] IDurableOrchestrationContext context, ILogger log)
         {
-            var blobUri = context.GetInput<Uri>();
+            var gridEvents = context.GetInput<List<EventGridEventPayload>>();
 
-            if (blobUri == null) { return; }
+            if (gridEvents == null) { return; }
 
-            var blobUriBuilder = new BlobUriBuilder(blobUri);
-            var prefix = Helpers.GetBlobFolderPath(blobUriBuilder.BlobName);
+            var tasks = new List<Task>();
 
-            var entityId = new EntityId(nameof(StatusEntity), prefix);
-            var statusEntityProxy = context.CreateEntityProxy<IStatusEntity>(entityId);
-
-            var containerName = blobUriBuilder.BlobContainerName;
-            
-            var existingHeader = await statusEntityProxy.GetHeaderAsync();
-
-            if (existingHeader != null && existingHeader.HasHeader)
+            foreach (EventGridEventPayload gridEvent in gridEvents)
             {
-                await context.CallActivityAsync("Verifier_CopyBlob_Activity", (blobUriBuilder.BlobName, containerName, existingHeader));
-            }
-            else
-            {
-                var header = await context.CallActivityAsync<Header>("Verifier_ReadVerifyBlob_Activity", blobUri);
-                if (header != null && header.HasHeader && !header.IsPartial)
+                var blobUri = new Uri(gridEvent.Data.Url);
+
+                var blobUriBuilder = new BlobUriBuilder(blobUri);
+                var prefix = Helpers.GetBlobFolderPath(blobUriBuilder.BlobName);
+
+                var entityId = new EntityId(nameof(StatusEntity), prefix);
+                var statusEntityProxy = context.CreateEntityProxy<IStatusEntity>(entityId);
+
+                var containerName = blobUriBuilder.BlobContainerName;
+
+                var existingHeader = await statusEntityProxy.GetHeaderAsync();
+
+                if (existingHeader != null && existingHeader.HasHeader)
                 {
-                    log.LogInformation($"Added header for prefix {prefix} into entity storage.");
-                    statusEntityProxy.SetHeaderAsync(header);
-                    var blobItems = await context.CallActivityAsync<List<string>>("Verifier_ReadBlobsFromPath_Activity", blobUri);
-
-                    foreach (var blobName in blobItems)
+                    tasks.Add(context.CallActivityAsync("Verifier_CopyBlob_Activity", (blobUriBuilder.BlobName, containerName, existingHeader)));
+                }
+                else
+                {
+                    var header = await context.CallActivityAsync<Header>("Verifier_ReadVerifyBlob_Activity", blobUri);
+                    if (header != null && header.HasHeader && !header.IsPartial)
                     {
-                       await context.CallActivityAsync("Verifier_CopyBlob_Activity", (blobName, containerName, header));
+                        log.LogInformation($"Added header for prefix {prefix} into entity storage.");
+                        statusEntityProxy.SetHeaderAsync(header);
+                        var blobItems = await context.CallActivityAsync<List<string>>("Verifier_ReadBlobsFromPath_Activity", blobUri);
+
+                        foreach (var blobName in blobItems)
+                        {
+                            tasks.Add(context.CallActivityAsync("Verifier_CopyBlob_Activity", (blobName, containerName, header)));
+                        }
                     }
                 }
             }
+
+            await Task.WhenAll(tasks);
         }
 
         [FunctionName("Verifier_ReadBlobsFromPath_Activity")]
@@ -115,16 +125,17 @@ namespace HeaderVerifier
                 return new OkObjectResult($"{{ \"validationResponse\" : \"{validationCode}\" }}");
             }
 
-            var eventPayload = JsonConvert.DeserializeObject<EventGridEventPayload[]>(requestBody)[0];
+            var eventPayload = JsonConvert.DeserializeObject<EventGridEventPayload[]>(requestBody);
 
-            if (eventPayload.EventType == @"Microsoft.Storage.BlobCreated")
+            var filteredEvents = eventPayload.Where(payload => 
+                payload.EventType == @"Microsoft.Storage.BlobCreated" 
+                && !string.IsNullOrEmpty(payload.Data.Url)
+                && Helpers.GetConfig()["SourceContainer"] == new BlobUriBuilder(new Uri(payload.Data.Url)).BlobContainerName).ToList();
+
+            if (filteredEvents != null && filteredEvents.Count > 0)
             {
-                var uri = new Uri(eventPayload.Data.Url);
-                var builder = new BlobUriBuilder(uri);
-                if (Helpers.GetConfig()["SourceContainer"] == builder.BlobContainerName)
-                {
-                    await starter.StartNewAsync("Verifier_Orchestrator", Guid.NewGuid().ToString(), uri);
-                }
+                var t = JsonConvert.SerializeObject(filteredEvents);
+                await starter.StartNewAsync("Verifier_Orchestrator", Guid.NewGuid().ToString(), filteredEvents);
             }
 
             return new AcceptedResult();
