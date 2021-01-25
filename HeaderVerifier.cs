@@ -57,6 +57,7 @@ namespace HeaderVerifier
 
                         foreach (var blobName in blobItems)
                         {
+                            log.LogInformation($"Adding blob with name {blobName} to upload queue.");
                             tasks.Add(context.CallActivityAsync("Verifier_CopyBlob_Activity", (blobName, containerName, header)));
                         }
                     }
@@ -101,6 +102,7 @@ namespace HeaderVerifier
         public static async Task VerifierCopyBlob_Activity([ActivityTrigger] IDurableActivityContext inputs, ILogger log)
         {
             var (blobName, containerName, header) = inputs.GetInput<(string, string, Header)>();
+            log.LogError($"Running upload of blob {blobName}");
             await Lib.CopyBlobAsync(blobName, containerName, header, log);
         }
 
@@ -138,6 +140,41 @@ namespace HeaderVerifier
                 await starter.StartNewAsync("Verifier_Orchestrator", Guid.NewGuid().ToString(), filteredEvents);
             }
 
+            return new AcceptedResult();
+        }
+
+        [FunctionName("Verifier_Start_ServiceBusQueueTrigger")]
+        public static async Task RunVerifierStartServiceBusQueueTrigger(
+            [ServiceBusTrigger("%SbQueueName%", Connection = "ServiceBusConnection")] string eventData,
+            [DurableClient] IDurableOrchestrationClient starter,
+            ILogger log)
+        {
+            string instanceId = await starter.StartNewAsync("Verifier_Orchestrator", null);
+
+            log.LogInformation($"Started orchestration with ID = '{instanceId}'.");
+
+            var eventPayload = JsonConvert.DeserializeObject<EventGridEventPayload>(eventData);
+
+            if (eventPayload.EventType == @"Microsoft.Storage.BlobCreated"
+                && !string.IsNullOrEmpty(eventPayload.Data.Url)
+                && Helpers.GetConfig()["SourceContainer"] == new BlobUriBuilder(new Uri(eventPayload.Data.Url)).BlobContainerName)
+            {
+                await starter.StartNewAsync("Verifier_Orchestrator", Guid.NewGuid().ToString(), new []{ eventPayload });
+            }
+          
+        }
+
+        [FunctionName("Verifier_Start_ResetEntity")]
+        public static async Task<IActionResult> RunVerifierStartResetEntity(
+            [HttpTrigger(AuthorizationLevel.Anonymous, "get", "post", Route = "reset/{headerPrefix}")] HttpRequest req,
+            string headerPrefix,
+            [DurableClient] IDurableEntityClient client,
+            ILogger log)
+        {
+            log.LogInformation($"Resetting entity with prefix {headerPrefix}");
+
+            var entityId = new EntityId(nameof(StatusEntity), headerPrefix);
+            await client.SignalEntityAsync(entityId, "Reset");
             return new AcceptedResult();
         }
     }

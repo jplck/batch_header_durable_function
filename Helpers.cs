@@ -19,9 +19,7 @@ namespace HeaderVerifier
         }
 
         public static BlockBlobClient GetBlockBlobClient(string storageConnection, string blobName, string containerName)
-        {
-            return new BlockBlobClient(storageConnection, containerName, blobName);
-        }
+            =>  new BlockBlobClient(storageConnection, containerName, blobName);
 
         public static string GetBlobFolderPath(string blobFullName)
         {
@@ -35,10 +33,7 @@ namespace HeaderVerifier
             return blobServiceClient.GetBlobContainerClient(containerName);
         }
 
-        public static string GetStorageConnection()
-        {
-            return GetConfig().GetConnectionString("StorageConnectionString");
-        }
+        public static string GetStorageConnection() => GetConfig()["StorageConnectionString"];
 
         public static IConfigurationRoot GetConfig()
         {

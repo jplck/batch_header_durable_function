@@ -72,16 +72,18 @@ namespace HeaderVerifier
             var sourceBlobClient = Helpers.GetBlockBlobClient(storageConnection, blobName, containerName);
             var destBlobClient = Helpers.GetBlockBlobClient(storageConnection, blobName, destinationContainer);
 
+            if (await destBlobClient.ExistsAsync())
+            {
+                logger.LogError("Skipping copy. Blob exists at destination");
+                return;
+            }
+
             BlobLeaseClient blobLeaseClient = sourceBlobClient.GetBlobLeaseClient();
+
+            await AddBlockRow(blockIds, $"Id: {header.Id}{Environment.NewLine}", destBlobClient);
 
             try
             {
-                if (await destBlobClient.ExistsAsync())
-                {
-                    logger.LogError("Skipping copy. Blob exists at destination");
-                    return;
-                }
-
                 BlobLease blobLease = await blobLeaseClient.AcquireAsync(new TimeSpan(-1));
                 logger.LogWarning("Blob lease acquired. LeaseId = {0}", blobLease.LeaseId);
 
@@ -98,12 +100,7 @@ namespace HeaderVerifier
                     logger.LogWarning($"Adding header to block {blobName}");
                     foreach (var headerRow in headerLinesWithoutPartials)
                     {
-                        var rowId = Helpers.Base64Encode(Guid.NewGuid().ToString());
-                        blockIds.Add(rowId);
-                        using (var headerStream = new MemoryStream(Encoding.UTF8.GetBytes(headerRow)))
-                        {
-                            await destBlobClient.StageBlockAsync(rowId, headerStream);
-                        }
+                        await AddBlockRow(blockIds, headerRow, destBlobClient);
                     }
                 }
 
@@ -117,12 +114,7 @@ namespace HeaderVerifier
                     if (regex.Match(line1).Success)
                     {
                         s.Position = line1.Length + Environment.NewLine.Length;
-                        var rowId = Helpers.Base64Encode(Guid.NewGuid().ToString());
-                        blockIds.Insert(0, rowId);
-                        using (var headerStream = new MemoryStream(Encoding.UTF8.GetBytes(line1 + Environment.NewLine)))
-                        {
-                            await destBlobClient.StageBlockAsync(rowId, headerStream);
-                        }
+                        await AddBlockRow(blockIds, line1 + Environment.NewLine, destBlobClient, 0);
                     }
 
                     //Prepare blockId for main content stream.
@@ -143,18 +135,37 @@ namespace HeaderVerifier
             {
                 if (e.Status == (int)HttpStatusCode.PreconditionFailed)
                 {
-                    Console.WriteLine(
+                    logger.LogWarning(
                         @"Precondition failure as expected. The lease ID was not provided.");
                 }
                 else
                 {
-                    Console.WriteLine(e.Message);
+                    logger.LogError($"Error during blob copy: {e.ErrorCode}");
                     throw;
                 }
             }
             finally
             {
                 await blobLeaseClient.BreakAsync();
+            }
+        }
+
+        private static async Task AddBlockRow(List<string> blockIds, string row, BlockBlobClient destBlobClient, int atIndex = -1)
+        {
+            var rowId = Helpers.Base64Encode(Guid.NewGuid().ToString());
+
+            if (atIndex != -1)
+            {
+                blockIds.Insert(atIndex, rowId);
+            }
+            else
+            {
+                blockIds.Add(rowId);
+            }
+            
+            using (var headerStream = new MemoryStream(Encoding.UTF8.GetBytes(row)))
+            {
+                await destBlobClient.StageBlockAsync(rowId, headerStream);
             }
         }
     }
