@@ -10,6 +10,9 @@ namespace HeaderVerifier
 {
     public class Header
     {
+        [JsonProperty("id")]
+        public string Id { get; set; }
+
         [JsonProperty("lines")]
         public List<string> Lines { get; set; }
 
@@ -22,6 +25,7 @@ namespace HeaderVerifier
         {
             Lines = new List<string>();
             IsPartial = true;
+            Id = Guid.NewGuid().ToString();
         }
     }
 
@@ -31,14 +35,11 @@ namespace HeaderVerifier
         [JsonProperty("header")]
         private Header header { get; set; }
 
-        public Task<Header> GetHeaderAsync()
-        {
-            return Task.FromResult(header);
-        }
-        public void SetHeaderAsync(Header header)
-        {
-            this.header = header;
-        }
+        public Task<Header> GetHeaderAsync() =>  Task.FromResult(header);
+
+        public void SetHeaderAsync(Header header) => this.header = header;
+
+        public void Reset() => header = new Header();
 
         [FunctionName(nameof(StatusEntity))]
         public static Task Run([EntityTrigger] IDurableEntityContext ctx)
@@ -50,5 +51,7 @@ namespace HeaderVerifier
         Task<Header> GetHeaderAsync();
 
         void SetHeaderAsync(Header header);
+
+        void Reset();
     }
 }
